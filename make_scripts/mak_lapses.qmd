@@ -114,6 +114,8 @@ lapses |>
 
 ### Save lapse file
 ```{r}
-study_dates |> 
-  write_csv(here::here(path_out, "lapses.csv"))
+lapses |> 
+  select(subid, lapse_start, lapse_end) |> 
+  write_csv(here::here(path_out, "lapses.csv")) |> 
+  glimpse()
 ```
