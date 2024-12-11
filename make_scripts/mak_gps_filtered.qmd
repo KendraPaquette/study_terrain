@@ -1,0 +1,115 @@
+---
+title: "Make Location Filtered GPS Data" 
+author: "Claire Punturieri"
+date: "`r lubridate::today()`"
+format: 
+  html: 
+    embed-resources: true
+    toc: true 
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---   
+
+### Notes
+
+Need to circle back to discuss filtering.
+
+What should we do if someone doesn't have an active point at a given location? Are we interested in using their last known point?
+
+### Setup
+
+```{r}
+#| message: false
+
+options(conflicts.policy = "depends.ok")
+
+library(tidyverse)
+library(future)
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/format_path.R?raw=true")
+
+path_processed <- format_path("studydata/risk/data_processed/shared")
+path_gps <- format_path("studydata/risk/data_processed/gps")
+path_terrain <- format_path("studydata/risk/data_processed/terrain")
+
+dist_max <- 0.031   # only use context if places are within 50 meters (0.031 miles)
+```
+
+### Read in files
+
+```{r}
+lapses <- read_csv(here::here(path_terrain, "lapses.csv"),
+                show_col_types = FALSE) |>
+  mutate(lapse_start = with_tz(lapse_start, tz = "America/Chicago"),
+         lapse_end = with_tz(lapse_end, tz = "America/Chicago"),
+         lapse_id = 1:n()) |> 
+  glimpse()
+
+context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types = FALSE) |>
+  # variable conversions
+  mutate(time = with_tz(time, tz = "America/Chicago"),
+         dist = dist / 1609.344,
+         duration = duration / 60,
+         speed = dist / duration,
+         dist_context = dist_context / 1609.344) |>
+    mutate(duration = if_else(dist > 0.01 & duration == 0, NA_real_, duration),
+         duration = if_else(speed > 100, NA_real_, duration),
+         duration = if_else(duration > 2 & dist > 0.31, NA_real_, duration),
+         duration = if_else(duration > 24, 24, duration),
+         known_loc = if_else(dist_context <= dist_max & speed <= 4, TRUE, FALSE),
+         known_loc = if_else(is.na(known_loc), FALSE, known_loc)) |> 
+  rename(dttm_obs = time) |> 
+  select(subid, lat, lon, dttm_obs, dist, duration, context_id, known_loc,
+         lat_context, lon_context, dist_context, risk)
+```
+
+### Filter subjects
+
+Filter down to subjects who had a lapse.
+```{r}
+subids_lapses <- lapses |>  
+  pull(subid) |>  
+  unique()
+
+context <- context |>
+  filter(subid %in% subids_lapses)
+```
+
+### Isolate to lapse events
+
+```{r}
+lapse_filter <- function(subid, context, lapses) {
+  
+  context_tmp <- context |> filter(subid == subid)
+  
+  lapses_tmp <- lapses |> filter(subid == subid)
+  
+  context_tmp <- context_tmp |> 
+    rowwise() |> 
+    mutate(
+      matched_lapse = list(lapses_tmp |>  
+                            filter(dttm_obs > lapse_start & dttm_obs < lapse_end) |> 
+                            select(lapse_start, lapse_end, lapse_id))
+    ) |> 
+    unnest(cols = c(matched_lapse))
+  
+  return(context_tmp)
+}
+```
+
+
+```{r}
+cl <- parallel::makePSOCKcluster(parallel::detectCores(logical = FALSE))
+doParallel::registerDoParallel(cl)
+future::plan(multisession, workers = parallel::detectCores(logical = FALSE))
+
+library(tictoc)
+tic()
+context_filtered <- context$subid |>
+  unique() |>
+  furrr::future_map(\(subid) lapse_filter(subid, context, lapses)) |>  
+  list_rbind() |> 
+  select(subid, lat, lon, dttm_obs, lapse_start, lapse_end, lapse_id, everything())
+toc()
+```
