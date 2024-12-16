@@ -53,6 +53,7 @@ context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types 
          duration = duration / 60,
          speed = dist / duration,
          dist_context = dist_context / 1609.344) |>
+  # maybe filter out NA points?
     mutate(duration = if_else(dist > 0.01 & duration == 0, NA_real_, duration),
          duration = if_else(speed > 100, NA_real_, duration),
          duration = if_else(duration > 2 & dist > 0.31, NA_real_, duration),
@@ -61,7 +62,10 @@ context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types 
          known_loc = if_else(is.na(known_loc), FALSE, known_loc)) |> 
   rename(dttm_obs = time) |> 
   select(subid, lat, lon, dttm_obs, dist, duration, context_id, known_loc,
-         lat_context, lon_context, dist_context, risk)
+         lat_context, lon_context, dist_context, full_address, risk)
+
+# need to think more if we want to filter things out
+context <- context |> drop_na(duration)
 ```
 
 ### Filter subjects
@@ -89,9 +93,10 @@ lapses |>
   nrow()
 ```
 
-
 ### Isolate to lapse events
 
+
+Use person missing from filtered file to check if they are actually missing gps.
 ```{r}
 lapse_filter <- function(id, context, lapses) {
   
@@ -103,11 +108,13 @@ lapse_filter <- function(id, context, lapses) {
     rowwise() |> 
     mutate(
       matched_lapse = list(lapses_tmp |>  
-                            filter(dttm_obs > lapse_start & dttm_obs < lapse_end) |> 
+                            filter(dttm_obs >= lapse_start & dttm_obs <= lapse_end) |> 
                             select(lapse_start, lapse_end, lapse_id)
                            )
     ) |> 
     unnest(cols = c(matched_lapse))
+  
+  # if nrow context tmp = 0, print a message, lapse id has no gps retained
   
   return(context_tmp)
 }
@@ -115,10 +122,6 @@ lapse_filter <- function(id, context, lapses) {
 
 
 ```{r}
-# not sure if we need these two?
-#cl <- parallel::makePSOCKcluster(parallel::detectCores(logical = FALSE))
-#doParallel::registerDoParallel(cl)
-
 future::plan(multisession, workers = parallel::detectCores(logical = FALSE))
 
 context_filtered <- context$subid |>
@@ -128,21 +131,91 @@ context_filtered <- context$subid |>
   select(subid, lat, lon, dttm_obs, lapse_start, lapse_end, lapse_id, everything())
 ```
 
-### EDA
+### Intermediate EDA
 
 Identify number of subjects who have been retained (i.e., have GPS points that occur during a lapse event).
 ```{r}
-context_filtered |> 
+nsub <- context |>
+  distinct(subid) |>
+  nrow()
+
+nsub_filtered <- context_filtered |> 
   distinct(subid) |> 
   nrow()
 ```
 
+Started with: `r nsub`
+
+Ended with: `r nsub_filtered`
+
+Identify what subjects are missing from context_filtered and their lapses.
+```{r}
+subids_filter <- context_filtered |>  
+  pull(subid) |>  
+  unique()
+
+missing_subjects <- context |>
+  filter(!subid %in% subids_filter) |> 
+  pull(subid) |> 
+  unique()
+
+missing_lapses <- lapses |> 
+  filter(subid %in% missing_subjects) |> 
+  pull(lapse_id) |> 
+  unique()
+```
+
+We are losing subjects: `r missing_subjects`
+
+We are missing lapse ids: `r missing_lapses`
+
+
 Identify number of unique lapse identifiers that have been retained.
 ```{r}
-context_filtered |> 
+nlapse <- lapses |> 
+  nrow()
+
+nlapse_filtered <- context_filtered |> 
   distinct(lapse_id) |> 
   nrow()
 ```
+
+Started with `r nlapse` lapses
+
+Ended with `r nlapse_filtered` lapses
+
+Identify number of observations at which an individual is at a known location.
+```{r}
+table(context_filtered$known_loc)
+```
+
+Of known locations, display relative risk levels.
+```{r}
+context_filt_known <- context_filtered |>
+  filter(known_loc == TRUE)
+
+table(context_filt_known$risk)
+```
+
+Of known locations, how do relative risk levels vary **outside** of lapse periods?
+```{r}
+dttm_filt <- context_filtered |>  
+  pull(dttm_obs) |>  
+  unique()
+
+context_nolapse <- context |>
+  filter(!dttm_obs %in% dttm_filt) |> 
+  filter(known_loc == TRUE)
+
+table(context_nolapse$risk)
+```
+
+Of known locations, how many observations are missing a risk level?
+```{r}
+sum(is.na(context_filt_known$risk))
+```
+
+### Filter to modal latitude and longitude pair
 
 Round lat/lon points to 4th decimal place per: https://blis.com/precision-matters-critical-importance-decimal-places-five-lowest-go/#:~:text=The%20number%20of%20decimal%20places%20correlates%20directly%20to%20the%20level,a%20large%20city%20or%20district.
 ```{r}
@@ -153,22 +226,78 @@ context_filtered <- context_filtered |>
 
 Calculate modal lat/lon at time of lapse event. If no mode, then select the first point.
 ```{r}
+get_mode <- function(x) {
+  unique_x <- unique(x)
+  freq <- table(x)
+  mode_value <- unique_x[which.max(freq)]
+  return(mode_value)
+}
+```
+
+```{r}
 get_modal_latlon <- function(lapse_id_arg, context_filtered) {
   
   context_tmp <- context_filtered |> filter(lapse_id_arg == lapse_id)
-  ## ended editing here
-  lapses_tmp <- lapses |> filter(subid == id)
   
-  context_tmp <- context_tmp |> 
-    rowwise() |> 
-    mutate(
-      matched_lapse = list(lapses_tmp |>  
-                            filter(dttm_obs > lapse_start & dttm_obs < lapse_end) |> 
-                            select(lapse_start, lapse_end, lapse_id)
-                           )
-    ) |> 
-    unnest(cols = c(matched_lapse))
+  context_tmp <- context_tmp |>
+    mutate(latlon = str_c(lat_rounded, ", ",lon_rounded))
+  
+  mode_value <- get_mode(context_tmp$latlon)
+  
+  freq <- table(context_tmp$latlon)
+  
+  if (max(freq) > 1) {
+    # keep rows where the column value equals the mode
+    #context_tmp <- context_tmp[context_tmp[[latlon]] == mode_value, ]
+    context_tmp <- context_tmp[context_tmp$latlon == mode_value, ]
+  } else {
+    # take first row if unique
+    context_tmp <- context_tmp[1, , drop = FALSE]
+  }
   
   return(context_tmp)
 }
 ```
+
+```{r}
+context_modal <- context_filtered$lapse_id |> 
+  unique() |>
+  furrr::future_map(\(lapse_id) get_modal_latlon(lapse_id_arg = lapse_id,
+                                                 context_filtered)) |>  
+  list_rbind()
+```
+
+### Final EDA
+
+Identify number of observations at which an individual is at a known location.
+```{r}
+table(context_modal$known_loc)
+```
+
+Of known locations, display relative risk levels.
+```{r}
+context_modal_known <- context_modal |>
+  filter(known_loc == TRUE)
+
+table(context_modal_known$risk)
+```
+
+Of known locations, how many observations are missing a risk level?
+```{r}
+sum(is.na(context_modal_known$risk))
+```
+
+How many observations are unique?
+```{r}
+context_modal$latlon |> 
+  unique() |>
+  length()
+```
+
+### Save out file
+
+```{r}
+context_modal |> write_csv(here::here(path_terrain, "gps_terrain.csv"))
+```
+
+
