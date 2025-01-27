@@ -46,6 +46,12 @@ lapses <- read_csv(here::here(path_terrain, "lapses.csv"),
          lapse_id = 1:n()) |> 
   glimpse()
 
+lapses <- lapses |>
+  group_by(subid) |> 
+  mutate(lapse_total = n(),
+         lapse_no = 1:n()) |> 
+  ungroup()
+
 context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types = FALSE) |>
   # variable conversions
   mutate(time = with_tz(time, tz = "America/Chicago"),
@@ -53,7 +59,6 @@ context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types 
          duration = duration / 60,
          speed = dist / duration,
          dist_context = dist_context / 1609.344) |>
-  # maybe filter out NA points?
     mutate(duration = if_else(dist > 0.01 & duration == 0, NA_real_, duration),
          duration = if_else(speed > 100, NA_real_, duration),
          duration = if_else(duration > 2 & dist > 0.31, NA_real_, duration),
@@ -62,10 +67,10 @@ context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types 
          known_loc = if_else(is.na(known_loc), FALSE, known_loc)) |> 
   rename(dttm_obs = time) |> 
   select(subid, lat, lon, dttm_obs, dist, duration, context_id, known_loc,
-         lat_context, lon_context, dist_context, full_address, risk)
+         lat_context, lon_context, dist_context, risk)
 
 # need to think more if we want to filter things out
-context <- context |> drop_na(duration)
+context <- context |> drop_na(duration) |> select(-dist, -duration)
 ```
 
 ### Filter subjects
@@ -95,8 +100,7 @@ lapses |>
 
 ### Isolate to lapse events
 
-
-Use person missing from filtered file to check if they are actually missing gps.
+This function takes in the gps and lapse information for an individual and filters gps data down to only gps points collected during a lapse period.
 ```{r}
 lapse_filter <- function(id, context, lapses) {
   
@@ -109,17 +113,18 @@ lapse_filter <- function(id, context, lapses) {
     mutate(
       matched_lapse = list(lapses_tmp |>  
                             filter(dttm_obs >= lapse_start & dttm_obs <= lapse_end) |> 
-                            select(lapse_start, lapse_end, lapse_id)
+                            select(lapse_start, lapse_end, lapse_id, lapse_no, lapse_total)
                            )
     ) |> 
     unnest(cols = c(matched_lapse))
-  
-  # if nrow context tmp = 0, print a message, lapse id has no gps retained
+
+  if (nrow(context_tmp) == 0) {
+    print("Lapse ID has no GPS retained!")
+  }
   
   return(context_tmp)
 }
 ```
-
 
 ```{r}
 future::plan(multisession, workers = parallel::detectCores(logical = FALSE))
@@ -128,7 +133,7 @@ context_filtered <- context$subid |>
   unique() |>
   furrr::future_map(\(subid) lapse_filter(id = subid, context, lapses)) |>  
   list_rbind() |> 
-  select(subid, lat, lon, dttm_obs, lapse_start, lapse_end, lapse_id, everything())
+  select(subid, lat, lon, dttm_obs, lapse_start, lapse_end, lapse_id, lapse_no, lapse_total, everything())
 ```
 
 ### Intermediate EDA
@@ -144,8 +149,7 @@ nsub_filtered <- context_filtered |>
   nrow()
 ```
 
-Started with: `r nsub`
-
+> Started with: `r nsub`
 Ended with: `r nsub_filtered`
 
 Identify what subjects are missing from context_filtered and their lapses.
@@ -165,10 +169,8 @@ missing_lapses <- lapses |>
   unique()
 ```
 
-We are losing subjects: `r missing_subjects`
-
+>We are losing subjects: `r missing_subjects`
 We are missing lapse ids: `r missing_lapses`
-
 
 Identify number of unique lapse identifiers that have been retained.
 ```{r}
@@ -180,8 +182,7 @@ nlapse_filtered <- context_filtered |>
   nrow()
 ```
 
-Started with `r nlapse` lapses
-
+>Started with `r nlapse` lapses
 Ended with `r nlapse_filtered` lapses
 
 Identify number of observations at which an individual is at a known location.
@@ -215,89 +216,84 @@ Of known locations, how many observations are missing a risk level?
 sum(is.na(context_filt_known$risk))
 ```
 
-### Filter to modal latitude and longitude pair
+### Filter to first latitude and longitude pair
 
-Round lat/lon points to 4th decimal place per: https://blis.com/precision-matters-critical-importance-decimal-places-five-lowest-go/#:~:text=The%20number%20of%20decimal%20places%20correlates%20directly%20to%20the%20level,a%20large%20city%20or%20district.
 ```{r}
-context_filtered <- context_filtered |> 
-  mutate(lat_rounded = round(lat, 4),
-         lon_rounded = round(lon, 4))
+context_first <- context_filtered |> 
+  group_by(lapse_id) |> 
+  slice_head(n = 1)
 ```
 
-Calculate modal lat/lon at time of lapse event. If no mode, then select the first point.
+### Identify individuals outside of Madison, WI
+
+Reverse-geocode lat/lon pairs to determine location at time of sampling.
 ```{r}
-get_mode <- function(x) {
-  unique_x <- unique(x)
-  freq <- table(x)
-  mode_value <- unique_x[which.max(freq)]
-  return(mode_value)
-}
+context_rev <- context_first |> tidygeocoder::reverse_geocode(lat = lat, long = lon,
+                                                       address = address_found,
+                                                       full_results = TRUE)
 ```
 
+View gps observations by country.
 ```{r}
-get_modal_latlon <- function(lapse_id_arg, context_filtered) {
-  
-  context_tmp <- context_filtered |> filter(lapse_id_arg == lapse_id)
-  
-  context_tmp <- context_tmp |>
-    mutate(latlon = str_c(lat_rounded, ", ",lon_rounded))
-  
-  mode_value <- get_mode(context_tmp$latlon)
-  
-  freq <- table(context_tmp$latlon)
-  
-  if (max(freq) > 1) {
-    # keep rows where the column value equals the mode
-    #context_tmp <- context_tmp[context_tmp[[latlon]] == mode_value, ]
-    context_tmp <- context_tmp[context_tmp$latlon == mode_value, ]
-  } else {
-    # take first row if unique
-    context_tmp <- context_tmp[1, , drop = FALSE]
-  }
-  
-  return(context_tmp)
-}
+table(context_rev$country)
 ```
 
+View gps observations by state.
 ```{r}
-context_modal <- context_filtered$lapse_id |> 
-  unique() |>
-  furrr::future_map(\(lapse_id) get_modal_latlon(lapse_id_arg = lapse_id,
-                                                 context_filtered)) |>  
-  list_rbind()
+table(context_rev$state)
+```
+
+View gps observations by county.
+```{r}
+context_rev_wi <- context_rev |> filter(state == "Wisconsin")
+
+table(context_rev_wi$county)
+```
+
+View gps observations by city.
+```{r}
+table(context_rev_wi$city)
+```
+
+Next, we filter down to observations **only within Dane County**.
+```{r}
+context_final <- context_rev |> filter(county == "Dane County")
 ```
 
 ### Final EDA
 
 Identify number of observations at which an individual is at a known location.
 ```{r}
-table(context_modal$known_loc)
+table(context_final$known_loc)
 ```
 
 Of known locations, display relative risk levels.
 ```{r}
-context_modal_known <- context_modal |>
+context_final_known <- context_final |>
   filter(known_loc == TRUE)
 
-table(context_modal_known$risk)
+table(context_final_known$risk)
 ```
 
 Of known locations, how many observations are missing a risk level?
 ```{r}
-sum(is.na(context_modal_known$risk))
+sum(is.na(context_final_known$risk))
 ```
 
 How many observations are unique?
 ```{r}
-context_modal$latlon |> 
-  unique() |>
-  length()
+context_final |>
+  mutate(latlon = paste0(lat, " ", lon)) |>
+  distinct(latlon) |>
+  nrow()
 ```
 
 ### Save out file
 
 ```{r}
-context_modal |> write_csv(here::here(path_terrain, "gps_terrain.csv"))
+context_final |>
+  select(subid:risk, city, county, state) |> 
+  write_csv(here::here(path_terrain, "gps_terrain.csv"))
 ```
 
 
