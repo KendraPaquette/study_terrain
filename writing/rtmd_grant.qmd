@@ -1,0 +1,38 @@
+---
+title: "Application for RTMD award" 
+author: "Kendra, Claire, and Chris"
+date: "`r lubridate::today()`"
+format: 
+  html: 
+    embed-resources: true
+    toc: true 
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---   
+
+
+### Project Title: Using risk terrain modeling to understand environmental factors associated with alcohol lapses
+
+### Project Description (750 words or less) 
+<!--we also have the option to upload supporting file, maybe this could be a preregistration?-->
+Our research aims to enhance continuing care treatment for substance use disorders by automating the delivery of personalized, adaptive recovery support. This support helps individuals monitor their current and future risk of relapse and adjust their behaviors and support systems accordingly.
+
+We developed a machine learning model using two distinct types of sensing data: geolocation and daily ecological momentary assessments (EMA). This model captures the dynamic and highly individualized lapse-risk trajectories of 146 participants in early recovery from alcohol use disorder over a three-month period. Our results show that next-day drinking lapses can be predicted with high accuracy (area under the ROC curve = 0.90). We also assessed local feature importance—identifying the most influential factors contributing to predictions for each participant on each day.
+
+One key finding is that time spent in locations participants subjectively rate as risky for their recovery consistently emerges as a top predictor of lapse. This suggests a strong link between time spent in high-risk environments and relapse. However, lapses also frequently occur in locations participants rate as "low risk," indicating that additional environmental factors, perhaps less salient or harder to self-assess, may play a significant role in relapse risk.
+
+In this study, we aim to apply a risk terrain modeling approach to better characterize environmental risk factors associated with lapses in both "high risk" and "low risk" locations. For instance, self-rated high-risk locations may have more overt alcohol-related cues (e.g., bars, liquor stores), while low-risk locations may contain subtler environmental triggers. By identifying and comparing these factors, we hope to uncover nuanced contributors to relapse risk and improve the precision of recovery support recommendations.
+
+Ultimately, this work seeks to inform the development of adaptive interventions that respond to environmental risk in real time. By integrating these insights into machine learning algorithms, we can enhance the personalization and effectiveness of relapse prevention strategies.
+
+
+### Briefly: What are the expected IMPLICATIONS for local/regional/national practice or policy? 
+Our findings have significant implications for clinical practice and public health policy. By identifying environmental risk factors associated with lapse, especially those in locations individuals perceive as low risk, we can improve the accuracy of predictive models and the effectiveness of interventions. Clinicians could use these insights to tailor recovery plans that account for environmental influences, while policymakers might consider zoning regulations or community planning strategies that reduce exposure to high-risk environments for individuals in recovery.
+
+### Briefly: Where do you want to go next with this project? 
+We plan to use risk terrain modeling to identify specific environmental features that contribute to lapse risk in both high and low self-rated risk locations. These findings will help us improve our machine learning models, by adding new risk-relevant features that may have been previously missed. This will ultimately enable us to make more precise predictions of lapse risk based on location data.
+
+Additionally, we aim to develop and test adaptive interventions that respond to environmental risk in real time. For example, if a location has features consistent with a high risk location that participants might subjectively rate as high risk, an intervention might focus on recommending they avoid that location. However, if a location has features consistent with a high risk location that participants might not subjectively rate as high risk, an intervention might focus on increasing awareness of the environmental cues present in that location and how to manage them.
+
+By advancing our understanding of environmental risk and integrating it into predictive and intervention frameworks, we hope to contribute to more effective, personalized, and scalable approaches to supporting long-term recovery from substance use disorders.
