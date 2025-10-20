@@ -1,0 +1,327 @@
+---
+title: "Make Location Filtered GPS Data" 
+author: "Claire Punturieri"
+date: "`r lubridate::today()`"
+format: 
+  html:
+    code-fold: true
+    code-summary: "Click to see code" 
+    embed-resources: true
+    toc: true 
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---   
+
+### Notes
+
+- Current filtering follows CP's GPS project decisions and further removes points that are deemed not trustworthy. We might want to play around with/discuss other filtering options at some point.
+
+- Should consider what we would like to do if someone doesn't have an active point during a lapse (e.g., we could potentially pick their last known point if it is within a certain time frame we set). Right now if there is no point during a lapse period, the lapse period is dropped altogether.
+
+### Setup
+
+```{r}
+#| message: false
+
+options(conflicts.policy = "depends.ok")
+
+library(tidyverse)
+library(future)
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/format_path.R?raw=true")
+
+path_processed <- format_path("studydata/risk/data_processed/shared")
+path_gps <- format_path("studydata/risk/data_processed/gps")
+path_terrain <- format_path("studydata/risk/data_processed/terrain")
+
+dist_max <- 0.031   # only use context if places are within 50 meters (0.031 miles)
+```
+
+### Read in files
+
+```{r}
+lapses <- read_csv(here::here(path_terrain, "lapses.csv"),
+                show_col_types = FALSE) |>
+  mutate(lapse_start = with_tz(lapse_start, tz = "America/Chicago"),
+         lapse_end = with_tz(lapse_end, tz = "America/Chicago"),
+         lapse_id = 1:n()) |> # each lapse gets unique identifier
+  glimpse()
+
+lapses <- lapses |>
+  group_by(subid) |> 
+  mutate(lapse_total = n(), # count total number of lapses per subj
+         lapse_no = 1:n()) |>  # label each lapse no per subj
+  ungroup()
+
+context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types = FALSE) |>
+  # variable conversions
+  mutate(time = with_tz(time, tz = "America/Chicago"),
+         dist = dist / 1609.344, # convert to miles
+         duration = duration / 60, # convert to hours
+         speed = dist / duration,
+         dist_context = dist_context / 1609.344) |> # convert to miles
+    mutate(duration = if_else(dist > 0.01 & duration == 0, NA_real_, duration),
+         duration = if_else(speed > 100, NA_real_, duration),
+         duration = if_else(duration > 2 & dist > 0.31, NA_real_, duration),
+         duration = if_else(duration > 24, 24, duration),
+         known_loc = if_else(dist_context <= dist_max & speed <= 4, TRUE, FALSE),
+         known_loc = if_else(is.na(known_loc), FALSE, known_loc)) |> 
+  rename(dttm_obs = time) |> 
+  select(subid, lat, lon, dttm_obs, dist, duration, context_id, known_loc,
+         lat_context, lon_context, dist_context, risk)
+
+# filter out points we've decided we do not trust
+context <- context |> drop_na(duration) |> select(-dist, -duration)
+```
+
+### Filter subjects
+
+Filter data down to subjects who had a lapse. Count subjects we are losing and number of total lapses retained.
+```{r}
+subids_total <- context |>  
+  pull(subid) |>  
+  unique()
+
+subids_lapses <- lapses |>  
+  pull(subid) |>  
+  unique()
+
+context <- context |>
+  filter(subid %in% subids_lapses)
+```
+`r length(subids_total)` subjects were in the original data set, `r length(subids_lapses)` subjects had a lapse. In total, there are `r lapses |> nrow()` distinct lapse events.
+
+### Isolate to lapse events
+
+Currently, the GPS data has been filtered to only include subjects who experienced a lapse event. The next step is to filter the GPS data down to *when* a lapse event was occurring.
+
+This function takes in the GPS and lapse information for an individual and filters GPS data down to only GPS points collected during a lapse period.
+```{r}
+lapse_filter <- function(id, context, lapses) {
+  
+  context_tmp <- context |> filter(subid == id)
+  context_tmp_id <- context_tmp |> pull(subid) |> unique()
+   
+  lapses_tmp <- lapses |> filter(subid == id)
+  
+  context_tmp <- context_tmp |> 
+    rowwise() |> 
+    mutate(
+      matched_lapse = list(lapses_tmp |>  
+                            filter(dttm_obs >= lapse_start & dttm_obs <= lapse_end) |> 
+                            select(lapse_start, lapse_end, lapse_id, lapse_no, lapse_total)
+                           )
+    ) |> 
+    unnest(cols = c(matched_lapse))
+
+  if (nrow(context_tmp) == 0) {
+    print(paste0("Subject ", context_tmp_id, " has no GPS retained for at least one lapse!"))
+  }
+  
+  return(context_tmp)
+}
+```
+
+Apply the function to the GPS data and save out the new filtered version. This function will print out subject IDs who are missing GPS data during at least one of their lapse events.
+```{r}
+future::plan(multisession, workers = parallel::detectCores(logical = FALSE))
+
+context_filtered <- context$subid |>
+  unique() |>
+  furrr::future_map(\(subid) lapse_filter(id = subid, context, lapses)) |>  
+  list_rbind() |> 
+  select(subid, lat, lon, dttm_obs, lapse_start, lapse_end, lapse_id, lapse_no, lapse_total, everything())
+```
+
+### Intermediate EDA
+
+Identify number of subjects who have been retained (i.e., have GPS points that occur during a lapse event).
+```{r}
+nsub <- context |>
+  distinct(subid) |>
+  nrow()
+
+nsub_filtered <- context_filtered |> 
+  distinct(subid) |> 
+  nrow()
+```
+We started with `r nsub` subjects and ended with `r nsub_filtered` subjects.
+
+Notes: subject 79 had only one lapse ID 298. 81 had only one lapse ID 302.
+161 had only one lapse ID 551. 225 had only one lapse ID 719. 230 had only one lapse ID 720.
+
+Identify what subjects are missing from context_filtered and their lapses.
+```{r}
+subids_filter <- context_filtered |>  
+  pull(subid) |>  
+  unique()
+
+missing_subjects <- context |>
+  filter(!subid %in% subids_filter) |> 
+  pull(subid) |> 
+  unique()
+
+missing_lapses <- lapses |> 
+  filter(subid %in% missing_subjects) |> 
+  pull(lapse_id) |> 
+  unique()
+```
+We are losing subjects: `r missing_subjects` with lapse ids: `r missing_lapses`. Each subject who is dropped from the data at this point only had one lapse event while on study **and** had no corresponding GPS data to match that lapse event.
+
+Identify number of unique lapse identifiers that have been retained. Contrary to the subjects who were dropped from the data completely, we will lose some lapse events for certain subjects if there was no GPS data during a lapse event (but we will still retain that subject if they have other lapse events that do have GPS data).
+```{r}
+nlapse <- lapses |> 
+  nrow()
+
+nlapse_filtered <- context_filtered |> 
+  distinct(lapse_id) |> 
+  nrow()
+```
+We started with `r nlapse` lapses and ended with `r nlapse_filtered` lapses. This means that `r nlapse - nlapse_filtered` lapse events did not have GPS data at the time of the lapse (five of these we already accounted for above.)
+
+Identify lapse IDs with no GPS data.
+```{r}
+lapse_ids_filtered <- context_filtered |>  
+  pull(lapse_id) |>  
+  unique()
+
+missing_lapse_ids <- lapses |> 
+  filter(!lapse_id %in% lapse_ids_filtered) |> 
+  pull(lapse_id) |> 
+  unique()
+```
+
+::: {.callout-note appearance="simple"}
+
+## Illustrative example
+
+Demonstrate that lapse ID 1, sub ID 3, has no GPS data during their lapse.
+
+Lapse occurred between `r lapses |> filter(subid == 3 & lapse_id == 1) |> pull(lapse_start)` and `r lapses |> filter(subid == 3 & lapse_id == 1) |> pull(lapse_end)`.
+
+Below is a print-out of their data on date of lapse. You can see there is no data that was collected during the one hour lapse period.
+```{r}
+context |> 
+  filter(subid == 3) |> 
+  filter(str_detect(dttm_obs,"2017-03-25")) |> 
+  select(subid, dttm_obs) |> 
+  kableExtra::kbl() |> 
+  kableExtra::kable_minimal()
+```
+
+
+:::
+
+Identify number of observations at which an individual is at a known location.
+```{r}
+table(context_filtered$known_loc)
+```
+
+Of known locations, display relative risk levels.
+```{r}
+context_filt_known <- context_filtered |>
+  filter(known_loc == TRUE)
+
+table(context_filt_known$risk)
+```
+
+Of known locations, how do relative risk levels vary **outside** of lapse periods?
+```{r}
+dttm_filt <- context_filtered |>  
+  pull(dttm_obs) |>  
+  unique()
+
+context_nolapse <- context |>
+  filter(!dttm_obs %in% dttm_filt) |> 
+  filter(known_loc == TRUE)
+
+table(context_nolapse$risk)
+```
+
+Of known locations, how many observations are missing a risk level?
+```{r}
+sum(is.na(context_filt_known$risk))
+```
+
+### Filter to first latitude and longitude pair
+
+```{r}
+context_first <- context_filtered |> 
+  group_by(lapse_id) |> 
+  slice_head(n = 1)
+```
+
+### Identify individuals outside of Madison, WI
+
+Reverse-geocode lat/lon pairs to determine location at time of sampling.
+```{r}
+context_rev <- context_first |> tidygeocoder::reverse_geocode(lat = lat, long = lon,
+                                                       address = address_found,
+                                                       full_results = TRUE)
+```
+
+View gps observations by country.
+```{r}
+table(context_rev$country)
+```
+
+View gps observations by state.
+```{r}
+table(context_rev$state)
+```
+
+View gps observations by county.
+```{r}
+context_rev_wi <- context_rev |> filter(state == "Wisconsin")
+
+table(context_rev_wi$county)
+```
+
+View gps observations by city.
+```{r}
+table(context_rev_wi$city)
+```
+
+Next, we filter down to observations **only within Dane County**.
+```{r}
+context_final <- context_rev |> filter(county == "Dane County")
+```
+
+### Final EDA
+
+Identify number of observations at which an individual is at a known location.
+```{r}
+table(context_final$known_loc)
+```
+
+Of known locations, display relative risk levels.
+```{r}
+context_final_known <- context_final |>
+  filter(known_loc == TRUE)
+
+table(context_final_known$risk)
+```
+
+Of known locations, how many observations are missing a risk level?
+```{r}
+sum(is.na(context_final_known$risk))
+```
+
+How many observations are unique?
+```{r}
+context_final |>
+  mutate(latlon = paste0(lat, " ", lon)) |>
+  distinct(latlon) |>
+  nrow()
+```
+
+### Save out file
+
+```{r}
+context_final |>
+  select(subid:risk, city, county, state) |> 
+  write_csv(here::here(path_terrain, "gps_terrain.csv"))
+```
+
+

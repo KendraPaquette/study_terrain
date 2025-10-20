@@ -1,0 +1,121 @@
+---
+title: "Make Lapses" 
+author: "Kendra Wyant"
+date: "`r lubridate::today()`"
+format: 
+  html: 
+    embed-resources: true
+    toc: true 
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---   
+
+### Notes
+
+This script uses `study_dates.csv` from the gps study and the cleaned `lapses.csv` RISK file. It filters down to lapses that are longer than one hour and outputs a tibble containing `subid`, `lapse_start`, and `lapse_end`.    
+
+This file will be used to filter down gps data to location during lapses and used for risk terrain modeling. 
+
+### Outstanding Descisions
+
+Most lapses are around 4 hours or less. Consider excluding unusually long lapses (e.g., 24+ hours).
+
+
+### Setup
+
+```{r}
+#| message: false
+
+options(conflicts.policy = "depends.ok")
+
+library(tidyverse)
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/format_path.R?raw=true")
+
+path_processed <- format_path("studydata/risk/data_processed/shared")
+path_gps <- format_path("studydata/risk/data_processed/gps")
+path_out <- format_path("studydata/risk/data_processed/terrain")
+
+```
+
+
+### Read in lapses
+
+```{r}
+lapses <- read_csv(here::here(path_processed, "lapses.csv"),
+                show_col_types = FALSE) |> 
+  glimpse()
+```
+
+### Read in Study Dates
+
+```{r}
+study_dates <- read_csv(here::here(path_gps, "study_dates.csv"),
+                show_col_types = FALSE) |> 
+  glimpse()
+```
+
+### Filter Lapses
+
+Filter to subids in `study_dates.csv`    
+- only 45 lapses lost by this filtering
+```{r}
+lapses <- lapses |> 
+  filter(subid %in% study_dates$subid) |> 
+  glimpse()
+```
+
+Filter to lapses at least 1 hour in duration  
+- 257 lapses lost in this filtering, but we still have a good amount
+```{r}
+lapses <- lapses |> 
+  filter(duration >= 1) |> 
+  glimpse()
+```
+
+
+### Light EDA
+
+774 lapses from 71 unique subids
+```{r}
+lapses |> nrow()
+
+lapses |> 
+  group_by(subid) |> 
+  count() |> 
+  arrange(desc(n))
+```
+
+Some extra long lapses - we might need to exclude?
+```{r}
+lapses |> 
+  ggplot(aes(duration)) +
+  geom_histogram() +
+  labs(title = "Lapse Duration Distribution",
+       x = "Duration (hours)",
+       y = "Count")
+```
+
+12 lapses over 24 hours. Could consider excluding these. Will retain for now
+```{r}
+lapses |> 
+  filter(duration > 24) |> 
+  arrange(desc(duration)) |> 
+  select(subid, duration)
+```
+
+It looks like 75% of lapses are 4 hours or less in duration
+```{r}
+lapses |> 
+  skimr::skim(duration)
+```
+
+
+### Save lapse file
+```{r}
+lapses |> 
+  select(subid, lapse_start, lapse_end) |> 
+  write_csv(here::here(path_out, "lapses.csv")) |> 
+  glimpse()
+```
