@@ -31,9 +31,9 @@ library(future)
 
 devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/format_path.R?raw=true")
 
-path_processed <- format_path("studydata/risk/data_processed/shared")
-path_gps <- format_path("studydata/risk/data_processed/gps")
-path_terrain <- format_path("studydata/risk/data_processed/terrain")
+path_processed <- format_path("risk/data_processed/shared")
+path_gps <- format_path("risk/data_processed/gps")
+path_terrain <- format_path("risk/data_processed/terrain")
 
 dist_max <- 0.031   # only use context if places are within 50 meters (0.031 miles)
 ```
@@ -54,25 +54,28 @@ lapses <- lapses |>
          lapse_no = 1:n()) |>  # label each lapse no per subj
   ungroup()
 
-context <- read_csv(here::here(path_gps, "gps_enriched.csv.xz"), show_col_types = FALSE) |>
+context <- read_csv(here::here(path_processed, "gps_enriched.csv.xz"), show_col_types = FALSE) |>
   # variable conversions
   mutate(time = with_tz(time, tz = "America/Chicago"),
          dist = dist / 1609.344, # convert to miles
          duration = duration / 60, # convert to hours
          speed = dist / duration,
          dist_context = dist_context / 1609.344) |> # convert to miles
-    mutate(duration = if_else(dist > 0.01 & duration == 0, NA_real_, duration),
-         duration = if_else(speed > 100, NA_real_, duration),
-         duration = if_else(duration > 2 & dist > 0.31, NA_real_, duration),
-         duration = if_else(duration > 24, 24, duration),
-         known_loc = if_else(dist_context <= dist_max & speed <= 4, TRUE, FALSE),
-         known_loc = if_else(is.na(known_loc), FALSE, known_loc)) |> 
+  mutate(duration = if_else(dist > 0.01 & duration == 0, NA_real_,
+                            duration),
+         duration = if_else(speed > 100, NA_real_,
+                            duration),
+         duration = if_else(duration > .5 & dist > 0.31, NA_real_,
+                            duration),
+         known_loc = if_else(dist_context <= 0.031 & speed <= 4,
+                             TRUE, FALSE),
+         known_loc = if_else(is.na(known_loc), FALSE, known_loc)) |>
   rename(dttm_obs = time) |> 
   select(subid, lat, lon, dttm_obs, dist, duration, context_id, known_loc,
          lat_context, lon_context, dist_context, risk)
 
 # filter out points we've decided we do not trust
-context <- context |> drop_na(duration) |> select(-dist, -duration)
+context <- context |> drop_na(duration) |> select(-dist)
 ```
 
 ### Filter subjects
@@ -244,84 +247,91 @@ Of known locations, how many observations are missing a risk level?
 sum(is.na(context_filt_known$risk))
 ```
 
-### Filter to first latitude and longitude pair
+### Final filtering
+
+First step is to create a function that takes an argument to either filter down to modal lat/lon during lapse or during the first hour of a lapse.
 
 ```{r}
-context_first <- context_filtered |> 
-  group_by(lapse_id) |> 
-  slice_head(n = 1)
+modal_lapse <- function(data, lapse_col, lapse_no_value, lat_col, lon_col, duration_col, first_hour = FALSE) {
+  # filter by lapse event
+  tmp <- data |> filter(.data[[lapse_col]] == lapse_no_value)
+  
+  # if first_hour == TRUE, filter down to data in the first hour ONLY
+  if (first_hour == TRUE) {
+    tmp <- tmp |> filter(
+      dttm_obs >= lapse_start &
+      dttm_obs < lapse_start + hours(1)
+    )
+  }
+  
+  # find longest period
+  tmp_longest <- tmp |> 
+    group_by(.data[[lat_col]], .data[[lon_col]]) |> 
+    summarize(duration = sum(.data[[duration_col]]), .groups = "drop") |>
+    slice_max(order_by = duration)
+  
+  # returns rows for matching top locations
+  result <- tmp |> 
+    filter((.data[[lat_col]] %in% tmp_longest[[lat_col]]) &
+             (.data[[lon_col]] %in% tmp_longest[[lon_col]])) |>
+    mutate(date = as_date(dttm_obs)) |> 
+    select(any_of(c("subid", "date", lapse_col, lat_col, lon_col,
+                    "lapse_start", "lapse_end",
+                    "lapse_no", "lapse_total", "risk")))
+}
 ```
 
-### Identify individuals outside of Madison, WI
+#### Filter to modal GPS point during lapse
 
-Reverse-geocode lat/lon pairs to determine location at time of sampling.
 ```{r}
-context_rev <- context_first |> tidygeocoder::reverse_geocode(lat = lat, long = lon,
-                                                       address = address_found,
-                                                       full_results = TRUE)
+data_full_lapse <- context_filt_known$lapse_id |>
+  unique() |>
+  purrr::map(\(lapse_id_value) modal_lapse(data = context_filt_known, lapse_id_value,
+                                                   lapse_col = "lapse_id",
+                                                   lat_col = "lat", lon_col = "lon",
+                                                   duration_col = "duration",
+                                           first_hour = FALSE)) |>
+  list_rbind() |> 
+  distinct(lapse_id, .keep_all = TRUE)
 ```
 
-View gps observations by country.
-```{r}
-table(context_rev$country)
-```
+#### Filter to modal GPS point during first hour of lapse
 
-View gps observations by state.
 ```{r}
-table(context_rev$state)
-```
-
-View gps observations by county.
-```{r}
-context_rev_wi <- context_rev |> filter(state == "Wisconsin")
-
-table(context_rev_wi$county)
-```
-
-View gps observations by city.
-```{r}
-table(context_rev_wi$city)
-```
-
-Next, we filter down to observations **only within Dane County**.
-```{r}
-context_final <- context_rev |> filter(county == "Dane County")
+data_hour_lapse <- context_filt_known$lapse_id |>
+  unique() |>
+  purrr::map(\(lapse_id_value) modal_lapse(data = context_filt_known, lapse_id_value,
+                                                   lapse_col = "lapse_id",
+                                                   lat_col = "lat", lon_col = "lon",
+                                                   duration_col = "duration",
+                                           first_hour = TRUE)) |>
+  list_rbind() |> 
+  distinct(lapse_id, .keep_all = TRUE)
 ```
 
 ### Final EDA
 
-Identify number of observations at which an individual is at a known location.
+Show relative risk levels.
 ```{r}
-table(context_final$known_loc)
+table(data_full_lapse$risk)
+table(data_hour_lapse$risk)
 ```
 
-Of known locations, display relative risk levels.
+What lapses are we losing by only filtering at the hour level?
 ```{r}
-context_final_known <- context_final |>
-  filter(known_loc == TRUE)
+dropped_lapses <- data_full_lapse$lapse_id[!(data_full_lapse$lapse_id %in% data_hour_lapse$lapse_id)]
 
-table(context_final_known$risk)
-```
-
-Of known locations, how many observations are missing a risk level?
-```{r}
-sum(is.na(context_final_known$risk))
-```
-
-How many observations are unique?
-```{r}
-context_final |>
-  mutate(latlon = paste0(lat, " ", lon)) |>
-  distinct(latlon) |>
-  nrow()
+length(dropped_lapses)
 ```
 
 ### Save out file
 
 ```{r}
-context_final |>
-  select(subid:risk, city, county, state) |> 
-  write_csv(here::here(path_terrain, "gps_terrain.csv"))
+data_full_lapse |>
+  write_csv(here::here(path_terrain, "gps_terrain_full.csv"))
+
+data_hour_lapse |>
+  write_csv(here::here(path_terrain, "gps_terrain_hour.csv"))
 ```
 
 
