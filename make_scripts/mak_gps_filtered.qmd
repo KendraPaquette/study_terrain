@@ -269,19 +269,32 @@ modal_lapse <- function(data, lapse_col, lapse_no_value, lat_col, lon_col, durat
   # filter by lapse event
   tmp <- data |> filter(.data[[lapse_col]] == lapse_no_value)
   
-  # if first_hour == TRUE, filter down to data in the first hour ONLY
-  if (first_hour == TRUE) {
-    tmp <- tmp |> filter(
-      dttm_obs >= last_point &
-      dttm_obs < lapse_start + hours(1)
-    )
-  }
+    if (first_hour == TRUE) {
+    # filter per row for first-hour window
+      tmp <- tmp |> rowwise() |> 
+        filter(dttm_obs >= last_point & dttm_obs <= lapse_start + hours(1)) |> 
+        ungroup()
+    
+    # if no points passed, fall back to last_point itself
+    if (nrow(tmp) == 0) {
+      tmp <- data |> filter(.data[[lapse_col]] == lapse_no_value & dttm_obs == last_point)
+    }
   
-  # find longest period
-  tmp_longest <- tmp |> 
-    group_by(.data[[lat_col]], .data[[lon_col]]) |> 
-    summarize(duration = sum(.data[[duration_col]]), .groups = "drop") |>
-    slice_max(order_by = duration)
+    # compute modal location
+    if (nrow(tmp) == 1) {
+      tmp_longest <- tmp
+    } else {
+      tmp_longest <- tmp |> 
+        group_by(.data[[lat_col]], .data[[lon_col]]) |> 
+        summarize(duration = sum(.data[[duration_col]]), .groups = "drop") |>
+        slice_max(order_by = duration)
+    }
+  } else {
+    tmp_longest <- tmp |> 
+      group_by(.data[[lat_col]], .data[[lon_col]]) |> 
+      summarize(duration = sum(.data[[duration_col]]), .groups = "drop") |>
+      slice_max(order_by = duration)
+  }
   
   # returns rows for matching top locations
   result <- tmp |> 
