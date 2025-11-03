@@ -108,13 +108,29 @@ lapse_filter <- function(id, context, lapses) {
    
   lapses_tmp <- lapses |> filter(subid == id)
   
+  lapses_tmp <- lapses_tmp |>
+    rowwise() |> 
+    mutate(
+      last_point = {
+        prev_point <- context_tmp |> 
+          filter(dttm_obs < lapse_start) |> 
+          slice_max(dttm_obs, n = 1)
+        
+        if (nrow(prev_point) > 0) prev_point$dttm_obs[1] else lapse_start
+      }
+    )
+  
+  
+  # filter based on shifted start
   context_tmp <- context_tmp |> 
     rowwise() |> 
     mutate(
-      matched_lapse = list(lapses_tmp |>  
-                            filter(dttm_obs >= lapse_start & dttm_obs <= lapse_end) |> 
-                            select(lapse_start, lapse_end, lapse_id, lapse_no, lapse_total)
-                           )
+      matched_lapse = list({
+        # get points in the window
+        lapses_tmp |>
+          filter(dttm_obs >= last_point & dttm_obs <= lapse_end) |> 
+        select(last_point, lapse_start, lapse_end, lapse_id, lapse_no, lapse_total)
+    })
     ) |> 
     unnest(cols = c(matched_lapse))
 
@@ -151,10 +167,7 @@ nsub_filtered <- context_filtered |>
 ```
 We started with `r nsub` subjects and ended with `r nsub_filtered` subjects.
 
-Notes: subject 79 had only one lapse ID 298. 81 had only one lapse ID 302.
-161 had only one lapse ID 551. 225 had only one lapse ID 719. 230 had only one lapse ID 720.
-
-Identify what subjects are missing from context_filtered and their lapses.
+Identify what subjects are missing from context_filtered and their lapses (this will be empty if we are pulling the last point prior to a lapse window, because then every lapse will have at least one point).
 ```{r}
 subids_filter <- context_filtered |>  
   pull(subid) |>  
@@ -181,7 +194,7 @@ nlapse_filtered <- context_filtered |>
   distinct(lapse_id) |> 
   nrow()
 ```
-We started with `r nlapse` lapses and ended with `r nlapse_filtered` lapses. This means that `r nlapse - nlapse_filtered` lapse events did not have GPS data at the time of the lapse (five of these we already accounted for above.)
+We started with `r nlapse` lapses and ended with `r nlapse_filtered` lapses. This means that `r nlapse - nlapse_filtered` lapse events did not have GPS data at the time of the lapse. These individuals appear to not have GPS data because they did not have reliable GPS during that point on study so it was truncated at an earlier part. This made sense for duration calculations but maybe doesn't make sense here, discuss?
 
 Identify lapse IDs with no GPS data.
 ```{r}
@@ -259,7 +272,7 @@ modal_lapse <- function(data, lapse_col, lapse_no_value, lat_col, lon_col, durat
   # if first_hour == TRUE, filter down to data in the first hour ONLY
   if (first_hour == TRUE) {
     tmp <- tmp |> filter(
-      dttm_obs >= lapse_start &
+      dttm_obs >= last_point &
       dttm_obs < lapse_start + hours(1)
     )
   }
