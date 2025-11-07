@@ -1,0 +1,260 @@
+---
+title: "RTM demo" 
+author: "Kendra Wyant"
+date: "`r lubridate::today()`"
+format: 
+  html: 
+    embed-resources: true
+    toc: true 
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+---   
+
+
+Notes:
+
+- 2 risk points with NA
+
+```{r}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(tigris)
+library(osmdata)
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/format_path.R?raw=true")
+
+path_adi <- format_path("risk/data_processed/gps2/adi")
+path_terrain <- format_path("risk/data_processed/terrain")
+```
+
+### Load and prepare lapses as spatial points
+
+```{r}
+lapses <- read_csv(here::here(path_terrain, "gps_terrain_hour.csv"),
+                   show_col_types = FALSE) 
+
+lapse_sf <- st_as_sf(lapses, 
+                     coords = c("lon", "lat"),
+                     crs = 4326)  # WGS84 (standard for lon/lat)
+lapse_sf <- st_transform(lapse_sf, crs = 32616)
+```
+
+### Get Madison Boundary
+
+```{r}
+madison <- places(state = "WI", cb = TRUE) %>%
+  filter(NAME == "Madison")
+
+# Transform to UTM
+madison <- st_transform(madison, crs = 32616)
+
+# Plot to verify
+plot(st_geometry(madison))
+```
+
+
+### Keep only lapses within Madison
+```{r}
+lapse_madison <- st_intersection(lapse_sf, madison)
+
+
+nrow(lapse_madison) # 421/568 lapses remain
+```
+
+### Get alcohol outlet data
+
+```{r}
+# Transform Madison to lat/lon for OSM query
+madison_latlon <- st_transform(madison, crs = 4326)
+bbox_vector <- as.vector(st_bbox(madison_latlon))
+
+# Download bars
+bars <- opq(bbox = bbox_vector) %>%
+  add_osm_feature(key = "amenity", value = "bar") %>%
+  osmdata_sf()
+bars_points <- bars$osm_points %>% st_transform(crs = 32616)
+
+# Download pubs
+Sys.sleep(2)
+pubs <- opq(bbox = bbox_vector) %>%
+  add_osm_feature(key = "amenity", value = "pub") %>%
+  osmdata_sf()
+pubs_points <- pubs$osm_points %>% st_transform(crs = 32616)
+
+# Download liquor stores
+Sys.sleep(2)
+liquor_stores <- opq(bbox = bbox_vector) %>%
+  add_osm_feature(key = "shop", value = "alcohol") %>%
+  osmdata_sf()
+liquor_points <- liquor_stores$osm_points %>% st_transform(crs = 32616)
+
+# Download convenience stores
+Sys.sleep(2)
+convenience <- opq(bbox = bbox_vector) %>%
+  add_osm_feature(key = "shop", value = "convenience") %>%
+  osmdata_sf()
+convenience_points <- convenience$osm_points %>% st_transform(crs = 32616)
+
+# Combine all alcohol outlets
+alcohol_outlets <- bind_rows(
+  bars_points %>% select(osm_id, name, geometry) %>% mutate(type = "bar"),
+  pubs_points %>% select(osm_id, name, geometry) %>% mutate(type = "pub"),
+  liquor_points %>% select(osm_id, name, geometry) %>% mutate(type = "liquor_store"),
+  convenience_points %>% select(osm_id, name, geometry) %>% mutate(type = "convenience")
+)
+
+# Filter to Madison only
+alcohol_madison <- st_intersection(alcohol_outlets, madison)
+
+# number of alcohol outlets
+nrow(alcohol_madison)
+table(alcohol_madison$type)
+```
+
+### Load ADI data 
+
+Read in ADI shape file
+```{r}
+adi <- st_read(here::here(path_adi, "wisconsin_adi_2020_joined.shp"))
+
+adi <- st_transform(adi, crs = 32616)
+```
+
+
+Filter to Madison
+```{r}
+adi_madison <- st_intersection(adi, madison)
+
+ggplot(adi_madison) + 
+  geom_sf(aes(fill = ad_ntn_)) +
+  theme_minimal()
+```
+
+
+### Visualize all data
+
+```{r}
+ggplot() +
+  geom_sf(data = madison, fill = "lightgray", color = "black") +
+  geom_sf(data = alcohol_madison, aes(color = type), size = 1, alpha = 0.6) +
+  geom_sf(data = lapse_madison, color = "red", size = 1.5, alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Madison: Alcohol Outlets and Relapse Events",
+       color = "Outlet Type")
+```
+
+
+### Create Analysis Grid
+
+Create 500m grid for Madison
+```{r}
+grid_madison <- st_make_grid(madison, cellsize = 500, square = TRUE) %>%
+  st_sf() %>%
+  mutate(cell_id = row_number())
+
+# Clip to Madison boundary
+grid_madison <- st_intersection(grid_madison, madison)
+
+nrow(grid_madison)
+
+
+ggplot() +
+  geom_sf(data = grid_madison, fill = NA, color = "gray") +
+  geom_sf(data = madison, fill = NA, color = "black", linewidth = 1) +
+  theme_minimal() +
+  labs(title = "Analysis Grid - 500m cells")
+```
+
+
+### Count lapses per grid cell
+
+```{r}
+lapses_in_grid <- st_join(grid_madison, lapse_madison)
+
+# Count lapses per cell
+lapse_counts <- lapses_in_grid %>%
+  st_drop_geometry() %>%
+  group_by(cell_id) %>%
+  summarise(lapse_count = n())
+
+# Join back to grid
+grid_madison <- grid_madison %>%
+  left_join(lapse_counts, by = "cell_id") %>%
+  mutate(lapse_count = ifelse(is.na(lapse_count), 0, lapse_count))
+
+# Check distribution
+summary(grid_madison$lapse_count)
+
+# Visualize relapse density
+ggplot() +
+  geom_sf(data = grid_madison, aes(fill = lapse_count), color = NA) +
+  scale_fill_viridis_c(option = "plasma") +
+  theme_minimal() +
+  labs(title = "Lapse Events per Grid Cell",
+       fill = "Lapses")
+```
+
+### Calculate alcohol outlet risk
+```{r}
+# Get centroids of grid cells
+grid_centroids <- st_centroid(grid_madison)
+
+# Calculate distance to all alcohol outlets
+distances <- st_distance(grid_centroids, alcohol_madison)
+
+# Find minimum distance (closest outlet) for each cell
+grid_madison$min_distance_alcohol <- apply(distances, 1, min)
+
+# Convert to risk score (exponential decay - closer = higher risk)
+grid_madison$alcohol_risk <- exp(-grid_madison$min_distance_alcohol / 500)
+
+# Count outlets within 500m buffer
+grid_madison$outlets_nearby <- apply(distances, 1, function(x) sum(x <= 500))
+```
+
+### Add ADI risk score
+
+```{r}
+# Join ADI values to grid cells
+grid_with_adi <- st_join(grid_madison, adi_madison %>% select(ad_ntn_, ad_stt_))
+
+# Take first match if cell overlaps multiple tracts
+grid_madison <- grid_with_adi %>%
+  group_by(cell_id) %>%
+  slice(1) %>%
+  ungroup()
+
+# Normalize ADI scores (higher ADI = more disadvantaged = higher risk)
+grid_madison$adi_risk <- scale(grid_madison$ad_ntn_)[,1]
+```
+
+### Summary of all risk factors
+```{r}
+summary(grid_madison %>% st_drop_geometry() %>% 
+        select(lapse_count, alcohol_risk, outlets_nearby, adi_risk))
+```
+
+### Prepare data for modeling
+```{r}
+# Remove geometry for modeling (keep spatial data separate for mapping)
+model_data <- grid_madison %>%
+  st_drop_geometry() %>%
+  # Remove cells with missing ADI or no data
+  filter(!is.na(adi_risk), !is.na(alcohol_risk))
+```
+
+### Run Poisson glm
+```{r}
+rtm_model <- glm(lapse_count ~ alcohol_risk + outlets_nearby + adi_risk,
+                 family = poisson(link = "log"),
+                 data = model_data)
+
+
+broom::tidy(rtm_model)
+```
+
