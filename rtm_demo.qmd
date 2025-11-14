@@ -1,0 +1,312 @@
+---
+title: "RTM demo" 
+author: "Kendra Wyant"
+date: "`r lubridate::today()`"
+format: 
+  html: 
+    embed-resources: true
+    toc: true 
+    toc_depth: 4
+editor_options: 
+  chunk_output_type: console
+execute:
+  warning: false
+---   
+
+### Decisions to be made
+
+1. Boundary area - e.g., city, area, county, or state
+2. Risk factors to use from nominatim, ADI, and other public data
+
+```{r}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(tigris)
+library(osmdata)
+library(janitor)
+
+devtools::source_url("https://github.com/jjcurtin/lab_support/blob/main/format_path.R?raw=true")
+
+path_gps2 <- format_path("risk/data_processed/gps2")
+path_terrain <- format_path("risk/data_processed/terrain")
+```
+
+### Load and prepare lapses as spatial points
+
+```{r}
+lapses <- read_csv(here::here(path_terrain, "gps_terrain_hour.csv"),
+                   show_col_types = FALSE) 
+
+lapse_sf <- st_as_sf(lapses, 
+                     coords = c("lon", "lat"),
+                     crs = 4326)  # WGS84 (standard for lon/lat)
+lapse_sf <- st_transform(lapse_sf, crs = 32616)
+```
+
+
+### Consider different bouondaries
+
+Madison boundary (421/568 lapses retained)
+```{r}
+madison <- places(state = "WI", cb = TRUE) |>
+  filter(NAME == "Madison")
+
+madison <- st_transform(madison, crs = 32616)
+
+lapse_madison <- st_intersection(lapse_sf, madison)
+
+
+nrow(lapse_madison) 
+
+ggplot() +
+  geom_sf(data = madison, fill = "lightgray", color = "black") +
+  geom_sf(data = lapse_madison, color = "red", size = 1.5, alpha = 0.7) +
+  theme_classic() +
+  labs(title = "Lapses in Madison")
+```
+
+
+Madison Area Boundary (465/568 retained) - Madison plus cities that directly border or are embedded within Madison,
+```{r}
+madison_area <- places(state = "WI", cb = TRUE) |>
+  filter(NAME %in% c("Madison", "Fitchburg", "Middleton", "Sun Prairie", 
+                     "Verona", "Monona", "Maple Bluff", "Shorewood Hills"))
+
+madison_area <- st_transform(madison_area, crs = 32616)
+
+lapse_madison_area <- st_intersection(lapse_sf, madison_area)
+nrow(lapse_madison_area)
+
+ggplot() +
+  geom_sf(data = madison_area, fill = "lightgray", color = "black") +
+  geom_sf(data = lapse_madison_area, color = "red", size = 1.5, alpha = 0.7) +
+  theme_classic() +
+  labs(title = "Lapses in Madison and Adjacent/embedded cities")
+```
+
+Dane County Boundary (484/568 retained)
+```{r}
+wi_counties <- counties(state = "WI", cb = TRUE)
+
+dane <- wi_counties |>
+  filter(NAME == "Dane")
+
+dane <- st_transform(dane, crs = 32616)
+
+lapse_dane <- st_intersection(lapse_sf, dane)
+nrow(lapse_dane)
+
+ggplot() +
+  geom_sf(data = dane, fill = "lightgray", color = "black") +
+  geom_sf(data = lapse_dane, color = "red", size = 1.5, alpha = 0.7) +
+  theme_classic() +
+  labs(title = "Lapses in Dane County")
+```
+
+
+WI Boundary (527/568 retained)
+```{r}
+wi_counties <- counties(state = "WI", cb = TRUE)
+
+wi <- st_transform(wi_counties, crs = 32616)
+
+lapse_wi <- st_intersection(lapse_sf, wi)
+nrow(lapse_wi)
+
+ggplot() +
+  geom_sf(data = wi, fill = "lightgray", color = "black") +
+  geom_sf(data = lapse_wi, color = "red", size = 1.5, alpha = 0.7) +
+  theme_classic() +
+  labs(title = "Lapses in WI")
+```
+
+### Nominatim Data
+
+```{r}
+nominatim <- st_read(here::here(path_gps2, "nominatim/osm_poi_wisconsin.gpkg"))
+
+nominatim <- st_transform(nominatim, crs = 32616)
+```
+
+
+
+### Get alcohol outlet data as demo
+
+```{r}
+dane_latlon <- st_transform(madison, crs = 4326)
+bbox_vector <- as.vector(st_bbox(dane_latlon))
+
+# Download bars
+bars <- opq(bbox = bbox_vector) |> 
+  add_osm_feature(key = "amenity", value = "bar") |> 
+  osmdata_sf()
+bars_points <- bars$osm_points |> st_transform(crs = 32616)
+
+# Download pubs
+pubs <- opq(bbox = bbox_vector) |>
+  add_osm_feature(key = "amenity", value = "pub") |>
+  osmdata_sf()
+pubs_points <- pubs$osm_points |> st_transform(crs = 32616)
+
+# Download liquor stores
+liquor_stores <- opq(bbox = bbox_vector) |>
+  add_osm_feature(key = "shop", value = "alcohol") |>
+  osmdata_sf()
+liquor_points <- liquor_stores$osm_points |> st_transform(crs = 32616)
+
+# Download convenience stores
+convenience <- opq(bbox = bbox_vector) |>
+  add_osm_feature(key = "shop", value = "convenience") |>
+  osmdata_sf()
+convenience_points <- convenience$osm_points |> st_transform(crs = 32616)
+
+# Combine all alcohol outlets
+alcohol_outlets <- bind_rows(
+  bars_points |> select(osm_id, name, geometry) |> mutate(type = "bar"),
+  pubs_points |> select(osm_id, name, geometry) |> mutate(type = "pub"),
+  liquor_points |> select(osm_id, name, geometry) |> mutate(type = "liquor_store"),
+  convenience_points |> select(osm_id, name, geometry) |> mutate(type = "convenience")
+)
+
+# Filter to Dane County only
+alcohol_dane <- st_intersection(alcohol_outlets, dane)
+
+# number of alcohol outlets
+nrow(alcohol_dane)
+table(alcohol_dane$type)
+```
+
+### Load ADI data 
+
+Read in ADI shape file
+```{r}
+adi <- st_read(here::here(path_gps2, "adi/wisconsin_adi_2020_joined.shp"))
+
+adi <- st_transform(adi, crs = 32616)
+```
+
+
+Filter to Dane County   
+
+Are the missing spots lakes?
+```{r}
+adi_dane<- st_intersection(adi, dane)
+
+ggplot(adi_dane) + 
+  geom_sf(aes(fill = ad_ntn_)) +
+  theme_classic()
+```
+
+
+### Visualize all data
+
+```{r}
+ggplot() +
+  geom_sf(data = dane, fill = "lightgray", color = "black") +
+  geom_sf(data = alcohol_dane, aes(color = type), size = 1, alpha = 0.6) +
+  geom_sf(data = lapse_dane, color = "red", size = 1.5, alpha = 0.7) +
+  theme_classic() +
+  labs(title = "Dane County Alcohol Outlets and LapseS",
+       color = "Outlet Type")
+```
+
+
+### Create Analysis Grid
+
+Create 500m grid for Dane County
+```{r}
+grid_dane <- st_make_grid(dane, cellsize = 500, square = TRUE) |>
+  st_sf() |>
+  mutate(cell_id = row_number())
+
+grid_dane <- st_intersection(grid_dane, dane)
+
+nrow(grid_dane)
+
+ggplot() +
+  geom_sf(data = grid_dane, fill = NA, color = "gray") +
+  geom_sf(data = dane, fill = NA, color = "black", linewidth = 1) +
+  theme_classic() +
+  labs(title = "Analysis Grid - 500m cells")
+```
+
+### Add lapse count
+
+This is the RTM outcome
+```{r}
+lapses_in_grid <- st_join(grid_dane, lapse_dane)
+
+lapse_counts <- lapses_in_grid |>
+  st_drop_geometry() |>
+  group_by(cell_id) |>
+  summarise(lapse_count = n())
+
+grid_dane <- grid_dane |>
+  left_join(lapse_counts, by = "cell_id") |>
+  mutate(lapse_count = ifelse(is.na(lapse_count), 0, lapse_count))
+
+```
+
+
+### Calculate alcohol outlet risk
+```{r}
+# Get centroids of grid cells
+grid_centroids <- st_centroid(grid_dane)
+
+# Calculate distance to all alcohol outlets
+distances <- st_distance(grid_centroids, alcohol_dane)
+
+# Find minimum distance (closest outlet) for each cell
+grid_dane$min_distance_alcohol <- apply(distances, 1, min)
+
+# Convert to risk score (exponential decay - closer = higher risk)
+grid_dane$alcohol_risk <- exp(-grid_dane$min_distance_alcohol / 500)
+
+# Count outlets within 500m buffer
+grid_dane$outlets_nearby <- apply(distances, 1, function(x) sum(x <= 500))
+```
+
+### Add ADI risk score
+
+```{r}
+# Join ADI values to grid cells
+grid_with_adi <- st_join(grid_dane, adi_dane |> select(ad_ntn_, ad_stt_))
+
+# Take first match if cell overlaps multiple tracts
+grid_dane <- grid_with_adi |>
+  group_by(cell_id) |>
+  slice(1) |>
+  ungroup()
+
+# Normalize ADI scores (higher ADI = more disadvantaged = higher risk)
+grid_dane$adi_risk <- scale(grid_dane$ad_ntn_)[,1]
+```
+
+### Prepare data for modeling
+```{r}
+# Remove geometry for modeling (keep spatial data separate for mapping)
+model_data <- grid_dane |>
+  st_drop_geometry() 
+```
+
+### Run Poisson glm
+
+- We will want to do cross-validation with glmnet I think 
+- Add interactions between risk factors and risk rating?
+- We will pre-register our analyses
+
+```{r}
+rtm_model <- glm(lapse_count ~ alcohol_risk + outlets_nearby + adi_risk,
+                 family = poisson(link = "log"),
+                 data = model_data)
+
+
+broom::tidy(rtm_model)
+
+summary(rtm_model)
+```
+
