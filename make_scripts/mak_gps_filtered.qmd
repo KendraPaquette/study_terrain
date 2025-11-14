@@ -76,6 +76,8 @@ context <- read_csv(here::here(path_processed, "gps_enriched.csv.xz"), show_col_
 
 # filter out points we've decided we do not trust
 context <- context |> drop_na(duration) |> select(-dist)
+
+locations <- read_csv(here::here(path_processed, "locations.csv"), show_col_types = FALSE)
 ```
 
 ### Filter subjects
@@ -99,7 +101,7 @@ context <- context |>
 
 Currently, the GPS data has been filtered to only include subjects who experienced a lapse event. The next step is to filter the GPS data down to *when* a lapse event was occurring.
 
-This function takes in the GPS and lapse information for an individual and filters GPS data down to only GPS points collected during a lapse period.
+This function takes in the GPS and lapse information for an individual and filters GPS data down to only GPS points collected during a lapse period. This includes *the last point* prior to when a lapse event started.
 ```{r}
 lapse_filter <- function(id, context, lapses) {
   
@@ -255,9 +257,58 @@ context_nolapse <- context |>
 table(context_nolapse$risk)
 ```
 
-Of known locations, how many observations are missing a risk level?
+Of known locations, how many observations are missing a risk level? These missing observations do not have a risk level that was identified at interview; therefore, we will drop these observations (two lapses from subid 3 at context_id 49).
 ```{r}
 sum(is.na(context_filt_known$risk))
+
+df[!is.na(df$value1), ]
+
+context_filt_known <- context_filt_known[!is.na(context_filt_known$risk),]
+```
+
+Within a lapse event, if there is a point retained prior to the lapse event *after* filtering down to known locations, does this point **match** the next point in the lapse window?
+```{r}
+context_filt_known |> 
+  group_by(lapse_id) |>
+  slice_head(n = 2) |> # take first two points
+  filter(n() == 2) |> # keep only points that have at least two 
+  mutate(same_loc = if_else(
+    first(context_id) == last(context_id),
+    TRUE,
+    FALSE
+  )) |>
+  select(subid, lapse_id, same_loc) |> 
+  unique() |>
+  ungroup() |> 
+  count(same_loc)
+```
+
+Let's also check the amount of time that occurs between the last point before the lapse window and the first point within the lapse window. This might help us make some filtering decisions because we might decide that we want to set a threshold for the amount of time between them (even if someone is at the same location).
+
+Reminders: duration is in hours and is calculated as amount of time SINCE the previous point. Therefore, we want to look at the amount of time between points when there is a point that occurs outside of the lapse window.
+
+Cross-checking high duration places with the locations file, all places that have a duration of greater than 10 hours are all someone's home. Most, but not all, of them are the same location as the previous point. Therefore, I think we could just drop the first point if it's not at the same location and retain if it is (because someone could spent 24 hours at home).
+```{r}
+context_filt_known |> 
+  group_by(lapse_id) |>
+  slice_head(n = 2) |> # take first two points
+  filter(n() == 2) |> # keep only points that have at least two
+  mutate(same_loc = if_else(
+    first(context_id) == last(context_id),
+    TRUE,
+    FALSE
+  )) |>
+  slice_tail() |> #view()  # then we need to further filter down to the second of those two points
+  pull(duration) |> 
+  hist()
+
+context_filt_known |> 
+  group_by(lapse_id) |>
+  slice_head(n = 2) |>
+  filter(n() == 2) |>
+  slice_tail() |>
+  pull(duration) |> 
+  summary()
 ```
 
 ### Final filtering
