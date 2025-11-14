@@ -278,7 +278,7 @@ context_filt_known |>
     FALSE
   )) |>
   select(subid, lapse_id, same_loc) |> 
-  unique() |>
+  unique() |> view()
   ungroup() |> 
   count(same_loc)
 ```
@@ -298,7 +298,8 @@ context_filt_known |>
     TRUE,
     FALSE
   )) |>
-  slice_tail() |> #view()  # then we need to further filter down to the second of those two points
+  slice_tail() |> # then we need to further filter down to the second of those two points
+  #filter(same_loc == FALSE) |> view()
   pull(duration) |> 
   hist()
 
