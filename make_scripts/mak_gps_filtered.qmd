@@ -15,9 +15,7 @@ editor_options:
 
 ### Notes
 
-- Current filtering follows CP's GPS project decisions and further removes points that are deemed not trustworthy. We might want to play around with/discuss other filtering options at some point.
-
-- Should consider what we would like to do if someone doesn't have an active point during a lapse (e.g., we could potentially pick their last known point if it is within a certain time frame we set). Right now if there is no point during a lapse period, the lapse period is dropped altogether.
+ - Current filtering follows CP's GPS project decisions and further removes points that are deemed not trustworthy. We might want to play around with/discuss other filtering options at some point.
 
 ### Setup
 
@@ -210,27 +208,6 @@ missing_lapse_ids <- lapses |>
   unique()
 ```
 
-::: {.callout-note appearance="simple"}
-
-## Illustrative example
-
-Demonstrate that lapse ID 1, sub ID 3, has no GPS data during their lapse.
-
-Lapse occurred between `r lapses |> filter(subid == 3 & lapse_id == 1) |> pull(lapse_start)` and `r lapses |> filter(subid == 3 & lapse_id == 1) |> pull(lapse_end)`.
-
-Below is a print-out of their data on date of lapse. You can see there is no data that was collected during the one hour lapse period.
-```{r}
-context |> 
-  filter(subid == 3) |> 
-  filter(str_detect(dttm_obs,"2017-03-25")) |> 
-  select(subid, dttm_obs) |> 
-  kableExtra::kbl() |> 
-  kableExtra::kable_minimal()
-```
-
-
-:::
-
 Identify number of observations at which an individual is at a known location.
 ```{r}
 table(context_filtered$known_loc)
@@ -261,8 +238,6 @@ Of known locations, how many observations are missing a risk level? These missin
 ```{r}
 sum(is.na(context_filt_known$risk))
 
-df[!is.na(df$value1), ]
-
 context_filt_known <- context_filt_known[!is.na(context_filt_known$risk),]
 ```
 
@@ -278,7 +253,7 @@ context_filt_known |>
     FALSE
   )) |>
   select(subid, lapse_id, same_loc) |> 
-  unique() |> view()
+  unique() |>
   ungroup() |> 
   count(same_loc)
 ```
